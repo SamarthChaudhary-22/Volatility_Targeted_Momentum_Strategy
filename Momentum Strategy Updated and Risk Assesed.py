@@ -1,0 +1,407 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[30]:
+
+
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[19]:
+
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import PercentFormatter
+# --- Setup ---
+sns.set_style("darkgrid")
+
+# --- 1. Data Collection ---
+# Define the list of tickers for your portfolio and the benchmark
+tickers = [
+    'TCS.NS', 'INFY.NS', 'HDFCBANK.NS', 'RELIANCE.NS', 'ITC.NS', 'KOTAKBANK.NS', 
+    'BAJFINANCE.NS', 'HCLTECH.NS', 'LT.NS', 'ASIANPAINT.NS', 'MARUTI.NS', 
+    'HINDUNILVR.NS', 'SUNPHARMA.NS', 'ULTRACEMCO.NS', 'BHARTIARTL.NS', 
+    'DRREDDY.NS', 'POWERGRID.NS', 'TECHM.NS', 'ONGC.NS', 'ADANIPORTS.NS', 
+    'TITAN.NS', 'ADANIENT.NS', 'WIPRO.NS', 'BHEL.NS', 'ADANIPOWER.NS'
+]
+benchmark_ticker = '^NSEI' # Nifty 50 Index
+
+# Combine tickers for a single download
+all_tickers = tickers + [benchmark_ticker]
+start_date = '2014-01-01'
+end_date = '2024-01-31'
+
+print("Downloading historical data...")
+# Use auto_adjust=True to get prices adjusted for splits and dividends
+all_data = yf.download(all_tickers, start=start_date, end=end_date, auto_adjust=True)['Close']
+
+if all_data.empty:
+    print("No data downloaded. Please check tickers and network connection.")
+else:
+    print("Download successful.")
+    
+# --- 2. Data Preprocessing ---
+# Resample daily data to get the last trading price of each month
+monthly_prices = all_data.resample('M').last()
+# Separate the benchmark from the stock prices
+benchmark_prices = monthly_prices[benchmark_ticker]
+stock_prices = monthly_prices.drop(columns=[benchmark_ticker])
+    
+# Drop any stocks (columns) that have missing data to ensure consistency
+stock_prices = stock_prices.dropna(axis=1)
+
+# --- 3. Signal Generation (Momentum Calculation) ---
+momentum = stock_prices.shift(1) / stock_prices.shift(4) - 1
+momentum = momentum.dropna()
+
+# --- 4. Backtesting Engine ---
+monthly_returns = stock_prices.pct_change()
+# --- Volatility Estimation ---
+VOL_WINDOW = 12  # 12-month rolling volatility
+
+rolling_vol = monthly_returns.shift(1).rolling(VOL_WINDOW).std()
+
+
+strategy_returns = pd.Series(dtype=float, index=monthly_returns.index)
+N = 10
+    
+# List to store monthly holdings for turnover calculation
+portfolio_holdings = []
+
+print("\nStarting backtest...")
+
+rebalance_dates = []
+
+REBALANCE_FREQ = 3  # months
+
+for i in range(0, len(momentum.index) - 1, REBALANCE_FREQ):
+    current_date = momentum.index[i]
+    rebalance_dates.append(current_date)
+
+    # Select top momentum stocks
+    top_performers = momentum.loc[current_date].nlargest(N).index
+    portfolio_holdings.append(set(top_performers))
+
+    # Hold portfolio for next REBALANCE_FREQ months
+    for j in range(1, REBALANCE_FREQ + 1):
+        if i + j >= len(momentum.index):
+            break
+
+        next_date = momentum.index[i + j]
+
+        # Volatility estimates
+        vols = rolling_vol.loc[current_date, top_performers].dropna()
+        if len(vols) < N / 2:
+            continue
+
+        # Inverse-volatility weights
+        inv_vol = 1 / vols
+        weights = inv_vol / inv_vol.sum()
+        print("Weight sum:", weights.sum(), "Max weight:", weights.max())
+
+
+        # Portfolio return
+        returns_next = monthly_returns.loc[next_date, weights.index]
+        strategy_returns.loc[next_date] = np.dot(weights.values, returns_next.values)
+
+
+
+        
+strategy_returns = strategy_returns.dropna()
+# ===============================
+# Turnover Calculation
+# ===============================
+
+monthly_turnover = []
+for i in range(1, len(portfolio_holdings)):
+    sold_stocks = portfolio_holdings[i-1] - portfolio_holdings[i]
+    monthly_turnover.append(len(sold_stocks) / N)
+
+avg_annual_turnover = np.mean(monthly_turnover) * 4
+# ===============================
+# Transaction Costs (Quarterly)
+# ===============================
+
+TRANSACTION_COST = 0.0025  # 25 bps
+
+# Initialize zero cost series
+transaction_costs = pd.Series(0.0, index=strategy_returns.index)
+
+# Apply costs only on rebalance months
+for i in range(1, len(portfolio_holdings)):
+    turnover = len(portfolio_holdings[i-1] - portfolio_holdings[i]) / N
+    rebalance_date = rebalance_dates[i]
+    transaction_costs.loc[rebalance_date] = turnover * TRANSACTION_COST
+
+# Net strategy returns
+strategy_returns_net = strategy_returns - transaction_costs
+
+
+
+
+print("Backtest complete.")
+
+    # --- 5. Performance Evaluation ---
+benchmark_returns = benchmark_prices.pct_change().dropna()
+benchmark_returns.name = "Nifty 50"
+
+comparison_df = pd.DataFrame({
+    'Strategy Gross': strategy_returns,
+    'Strategy Net': strategy_returns_net,
+    'Benchmark': benchmark_returns
+}).dropna()
+
+
+    # --- Calculate Advanced Metrics ---
+    # Portfolio Turnover
+
+    # Hit Rate
+monthly_hit_rate = (comparison_df['Strategy Gross'] > comparison_df['Benchmark']).mean()
+    
+def calculate_performance_metrics(returns_series, risk_free_rate=0.05):
+        total_return = (1 + returns_series).prod()
+        num_years = len(returns_series) / 12
+        cagr = (total_return ** (1 / num_years)) - 1
+        annualized_volatility = returns_series.std() * np.sqrt(12)
+        sharpe_ratio = (cagr - risk_free_rate) / annualized_volatility
+        cumulative_returns = (1 + returns_series).cumprod()
+        peak = cumulative_returns.expanding(min_periods=1).max()
+        drawdown = (cumulative_returns - peak) / peak
+        max_drawdown = drawdown.min()
+        
+        return {
+            'Annualized Return (CAGR)': f"{cagr:.2%}",
+            'Annualized Volatility': f"{annualized_volatility:.2%}",
+            'Sharpe Ratio': f"{sharpe_ratio:.2f}",
+            'Maximum Drawdown': f"{max_drawdown:.2%}"
+        }
+
+strategy_metrics = calculate_performance_metrics(comparison_df['Strategy Gross'])
+benchmark_metrics = calculate_performance_metrics(comparison_df['Benchmark'])
+    
+    # Add advanced metrics to the summary
+strategy_metrics['Annual Turnover'] = f"{avg_annual_turnover:.2%}"
+strategy_metrics['Monthly Hit Rate'] = f"{monthly_hit_rate:.2%}"
+benchmark_metrics['Annual Turnover'] = "N/A"
+benchmark_metrics['Monthly Hit Rate'] = "N/A"
+    
+performance_summary = pd.DataFrame({
+        'Momentum Strategy': strategy_metrics,
+        'Nifty 50 Benchmark': benchmark_metrics
+    })
+print("\n--- Performance Metrics ---")
+print(performance_summary)
+
+
+
+    # --- 6. Cumulative Growth Visualization ---
+initial_investment = 100
+strategy_growth = initial_investment * (1 + comparison_df['Strategy Gross']).cumprod()
+benchmark_growth = initial_investment * (1 + comparison_df['Benchmark']).cumprod()
+strategy_growth_net = initial_investment * (1 + comparison_df['Strategy Net']).cumprod()
+
+
+plt.figure(figsize=(14, 8))
+plt.plot(strategy_growth.index, strategy_growth, label='Momentum Strategy', color='blue', linewidth=2)
+plt.plot(benchmark_growth.index, benchmark_growth, label='Nifty 50 Benchmark', color='red', linestyle='--', linewidth=2)
+plt.title('Strategy Performance vs. Nifty 50 Benchmark (2014-2024)', fontsize=16)
+plt.xlabel('Date', fontsize=12)
+plt.ylabel('Portfolio Value (Log Scale)', fontsize=12)
+plt.legend(loc='upper left', fontsize=12)
+plt.grid(True)
+plt.yscale('log')
+plt.show()
+strategy_metrics_gross = calculate_performance_metrics(comparison_df['Strategy Gross'])
+strategy_metrics_net = calculate_performance_metrics(comparison_df['Strategy Net'])
+
+
+    # --- 7. Yearly Return Analysis ---
+print("\n--- Yearly Returns Comparison ---")
+yearly_returns_df = comparison_df.groupby(comparison_df.index.year).apply(lambda x: (1 + x).prod() - 1)
+print(yearly_returns_df.to_string(formatters={'Strategy': '{:.2%}'.format, 'Benchmark': '{:.2%}'.format}))
+
+ax = yearly_returns_df.plot(kind='bar', figsize=(14, 8), width=0.8)
+plt.title('Yearly Returns: Momentum Strategy vs. Nifty 50', fontsize=16)
+plt.ylabel('Annual Return', fontsize=12)
+plt.xlabel('Year', fontsize=12)
+plt.xticks(rotation=45)
+plt.axhline(0, color='grey', linewidth=0.8)
+ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+plt.legend(loc='best')
+plt.tight_layout()
+plt.savefig(fname='yearly_returns_comparision_2')
+plt.show()
+
+    # --- 8. Detailed Drawdown Analysis ---
+print("\n--- Drawdown Analysis ---")
+strategy_drawdown = (strategy_growth - strategy_growth.expanding().max()) / strategy_growth.expanding().max()
+benchmark_drawdown = (benchmark_growth - benchmark_growth.expanding().max()) / benchmark_growth.expanding().max()
+
+plt.figure(figsize=(14, 8))
+plt.plot(strategy_drawdown.index, strategy_drawdown, label='Strategy Drawdown', color='blue')
+plt.plot(benchmark_drawdown.index, benchmark_drawdown, label='Benchmark Drawdown', color='red', linestyle='--')
+plt.title('Drawdown Over Time', fontsize=16)
+plt.ylabel('Drawdown', fontsize=12)
+plt.xlabel('Date', fontsize=12)
+plt.legend(loc='best')
+plt.gca().yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+plt.fill_between(strategy_drawdown.index, strategy_drawdown, color='blue', alpha=0.1)
+plt.grid(True)
+plt.savefig(fname='drawdown_comparision')
+plt.show()
+
+    # --- 9. Distribution of Monthly Returns ---
+print("\n--- Distribution of Monthly Returns ---")
+plt.figure(figsize=(12, 7))
+sns.kdeplot(comparison_df['Strategy Gross'], label='Momentum Strategy', color='blue', fill=True, lw=2)
+sns.kdeplot(comparison_df['Benchmark'], label='Nifty 50 Benchmark', color='red', fill=True, lw=2)
+plt.title('Distribution of Monthly Returns', fontsize=16)
+plt.xlabel('Monthly Return', fontsize=12)
+plt.ylabel('Density', fontsize=12)
+plt.gca().xaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+plt.legend(loc='best')
+plt.grid(True)
+plt.savefig(fname='monthly_returns_comparision')
+plt.show()
+
+
+#---10. Sortino Ratio ---
+def downside_risk_metrics(returns, rf=0.05):
+    downside = returns[returns < 0]
+    downside_vol = downside.std() * np.sqrt(12)
+
+    cagr = (1 + returns).prod() ** (12 / len(returns)) - 1
+    sortino = (cagr - rf) / downside_vol if downside_vol != 0 else np.nan
+
+    return downside_vol, sortino
+
+down_vol, sortino = downside_risk_metrics(comparison_df['Strategy Net'])
+
+#--- 11. Tail-Risk Metrics---
+
+def tail_risk_metrics(returns, alpha=0.05):
+    var = np.percentile(returns, alpha * 100)
+    cvar = returns[returns <= var].mean()
+    return var, cvar
+
+var_95, cvar_95 = tail_risk_metrics(comparison_df['Strategy Net'])
+
+
+#--- 12. Drawdown Depth and Duration---
+
+def drawdown_duration(cumulative_returns):
+    drawdown = cumulative_returns / cumulative_returns.cummax() - 1
+    underwater = drawdown < 0
+
+    durations = []
+    current = 0
+    for u in underwater:
+        if u:
+            current += 1
+        elif current > 0:
+            durations.append(current)
+            current = 0
+
+    return max(durations) if durations else 0
+
+cum = (1 + comparison_df['Strategy Net']).cumprod()
+max_dd_duration = drawdown_duration(cum)
+
+#--- 13. Rolling Risks ---
+rolling_vol = comparison_df['Strategy Net'].rolling(12).std() * np.sqrt(12)
+rolling_sharpe = (
+    comparison_df['Strategy Net']
+    .rolling(12)
+    .mean() /
+    comparison_df['Strategy Net']
+    .rolling(12)
+    .std()
+) * np.sqrt(12)
+
+
+# --- 14. Market Relative Risks ---
+cov = np.cov(
+    comparison_df['Strategy Net'],
+    comparison_df['Benchmark']
+)[0,1]
+
+beta = cov / np.var(comparison_df['Benchmark'])
+correlation = np.corrcoef(
+    comparison_df['Strategy Net'],
+    comparison_df['Benchmark']
+)[0,1]
+
+# --- 15. Risk Report ---
+
+risk_summary = {
+    "Downside Volatility (Ann.)": f"{down_vol:.2%}",
+    "Sortino Ratio": f"{sortino:.2f}",
+    "VaR 95% (Monthly)": f"{var_95:.2%}",
+    "CVaR 95% (Monthly)": f"{cvar_95:.2%}",
+    "Max Drawdown Duration (Months)": max_dd_duration,
+    "Beta vs Nifty": f"{beta:.2f}",
+    "Correlation vs Nifty": f"{correlation:.2f}"
+}
+
+risk_summary_df = pd.DataFrame.from_dict(
+    risk_summary, orient='index', columns=['Value']
+)
+
+print("\n--- Risk Diagnostics ---")
+print(risk_summary_df)
+
+# Visual Rolling Volatility
+plt.figure(figsize=(12,6))
+plt.plot(rolling_vol, label='Rolling 12M Volatility')
+plt.title('Rolling Annualized Volatility')
+plt.ylabel('Volatility')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Visual Rolling Sharpe
+plt.figure(figsize=(12,6))
+plt.plot(rolling_sharpe, label='Rolling 12M Sharpe')
+plt.axhline(0, color='red', linestyle='--')
+plt.title('Rolling Sharpe Ratio')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+print("\nReturn / Risk Efficiency:",
+      comparison_df['Strategy Net'].mean() /
+      comparison_df['Strategy Net'].std())
+
+
+
+
+print("Average monthly turnover:", np.mean(monthly_turnover))
+print("Average monthly cost:", transaction_costs.mean())
+print("Number of rebalances:", len(rebalance_dates))
+print("Average quarterly turnover:", transaction_costs[transaction_costs > 0].mean() / TRANSACTION_COST)
+print("Average monthly cost:", transaction_costs.mean())
+print("Holdings:", len(portfolio_holdings))
+print("Rebalances:", len(rebalance_dates))
+print(strategy_returns.index.min())
+print(strategy_returns.index.max())
+print(len(strategy_returns))
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
